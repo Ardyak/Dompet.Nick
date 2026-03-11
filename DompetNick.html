@@ -484,6 +484,571 @@
 <!-- RIWAYAT -->
 <div class="page" id="page-riwayat">
   <div style="display:flex;gap:8px;margin-bottom:4px;">
+    <button class="export-btn" onclick="exportCSV()" style="flex:1;">⬇ CSV</button>
+    <label class="export-btn" style="flex:1;text-align:center;cursor:pointer;">
+      ⬆ CSV
+      <input type="file" accept=".csv" onchange="importCSV(event)" style="display:none;">
+    </label>
+    <button class="export-btn" onclick="exportJSON()" style="flex:1;">⬇ JSON</button>
+    <label class="export-btn" style="flex:1;text-align:center;cursor:pointer;">
+      ⬆ JSON
+      <input type="file" accept=".json" onchange="importJSON(event)" style="display:none;">
+    </label>
+  </div>
+  <div id="import-status" style="font-size:0.75rem;text-align:center;margin-bottom:8px;"></div>
+  <div class="filter-row" id="filter-row">
+    <button class="filter-chip active" onclick="setFilter('semua')">Semua</button>
+    <button class="filter-chip" onclick="setFilter('cash')">Cash</button>
+    <button class="filter-chip" onclick="setFilter('bank')">Rekening</button>
+    <button class="filter-chip" onclick="setFilter('jajan')">Jajan</button>
+    <button class="filter-chip" onclick="setFilter('selfcare')">Self Care</button>
+    <button class="filter-chip" onclick="setFilter('game')">Game</button>
+    <button class="filter-chip" onclick="setFilter('transportasi')">Transport</button>
+    <button class="filter-chip" onclick="setFilter('utilities')">Utilities</button>
+    <button class="filter-chip" onclick="setFilter('tabungan')">Tabungan</button>
+  </div>
+  <div class="tx-list" id="history-list">
+    <div class="empty-state">Belum ada transaksi</div>
+  </div>
+</div>
+
+<script>
+// ── DATA ──────────────────────────────────────────────────────
+let transactions = JSON.parse(localStorage.getItem('nick_keuangan') || '[]');
+let subWallets = JSON.parse(localStorage.getItem('nick_subwallets') || '["BRI","BCA","GoPay","ShopeePay"]');
+let currentType = 'out';
+let currentWallet = 'cash';
+let currentSubWallet = 'BRI';
+let currentFilter = 'semua';
+let pieChartInst = null;
+let barChartInst = null;
+
+const CAT_COLORS = {
+  jajan: '#ff9f43', selfcare: '#ee5a9e', digital: '#9b59b6',
+  transportasi: '#4eaaff', utilities: '#1dd1a1', tabungan: '#f0c040',
+  lainnya: '#888', pemasukan: '#2ecc71'
+};
+const CAT_LABELS = {
+  jajan: '🍜 Jajan', selfcare: '💆 Self Care', digital: '💻 Digital Needs',
+  transportasi: '🚗 Transportasi', utilities: '💡 Utilities',
+  tabungan: '💰 Tabungan', lainnya: '📦 Lainnya', pemasukan: '▲ Pemasukan'
+};
+
+function save() { localStorage.setItem('nick_keuangan', JSON.stringify(transactions)); }
+function fmt(n) { return 'Rp ' + Math.abs(n).toLocaleString('id-ID'); }
+
+// ── PAGES ─────────────────────────────────────────────────────
+function showPage(id) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+  document.getElementById('page-' + id).classList.add('active');
+  const idx = ['home','tambah','grafik','riwayat'].indexOf(id);
+  document.querySelectorAll('nav button')[idx].classList.add('active');
+  if (id === 'home') renderHome();
+  if (id === 'grafik') renderGrafik();
+  if (id === 'riwayat') renderRiwayat();
+}
+
+// ── FORM ──────────────────────────────────────────────────────
+function setType(t) {
+  currentType = t;
+  document.getElementById('btn-out').className = 'type-btn' + (t === 'out' ? ' active-out' : '');
+  document.getElementById('btn-in').className = 'type-btn' + (t === 'in' ? ' active-in' : '');
+  document.getElementById('cat-group').style.display = t === 'out' ? 'block' : 'none';
+}
+
+function setWallet(w) {
+  currentWallet = w;
+  document.getElementById('btn-cash').className = 'wallet-btn' + (w === 'cash' ? ' active-cash' : '');
+  document.getElementById('btn-bank').className = 'wallet-btn' + (w === 'bank' ? ' active-bank' : '');
+  document.getElementById('sub-wallet-group').style.display = w === 'bank' ? 'block' : 'none';
+  if (w === 'bank') renderSubWalletBtns();
+}
+
+function renderSubWalletBtns() {
+  const el = document.getElementById('sub-wallet-btns');
+  el.innerHTML = subWallets.map(sw => `
+    <button onclick="setSubWallet('${sw}')" style="padding:7px 14px; border-radius:20px; border:1px solid ${currentSubWallet===sw?'var(--bank)':'var(--border)'}; background:${currentSubWallet===sw?'rgba(78,170,255,0.15)':'var(--surface2)'}; color:${currentSubWallet===sw?'var(--bank)':'var(--muted)'}; font-family:'DM Mono',monospace; font-size:0.72rem; cursor:pointer; transition:all 0.2s;">${sw}</button>
+  `).join('');
+}
+
+function setSubWallet(sw) {
+  currentSubWallet = sw;
+  renderSubWalletBtns();
+}
+
+function tambahSubWallet() {
+  const val = document.getElementById('custom-wallet-input').value.trim();
+  if (!val) return;
+  if (!subWallets.includes(val)) {
+    subWallets.push(val);
+    localStorage.setItem('nick_subwallets', JSON.stringify(subWallets));
+  }
+  currentSubWallet = val;
+  document.getElementById('custom-wallet-input').value = '';
+  renderSubWalletBtns();
+}
+
+function tambahTransaksi() {
+  const nominal = parseFloat(document.getElementById('nominal').value);
+  if (!nominal || nominal <= 0) { alert('Nominal harus diisi!'); return; }
+  const catatan = document.getElementById('catatan').value.trim();
+  const kategori = currentType === 'in' ? 'pemasukan' : document.getElementById('kategori').value;
+  const tx = {
+    id: Date.now(),
+    type: currentType,
+    wallet: currentWallet,
+    subWallet: currentWallet === 'bank' ? currentSubWallet : null,
+      /* HEADER */
+  header {
+    padding: 28px 24px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: sticky;
+    top: 0;
+    background: var(--bg);
+    z-index: 100;
+  }
+  header h1 {
+    font-family: 'Syne', sans-serif;
+    font-weight: 800;
+    font-size: 1.4rem;
+    letter-spacing: -0.5px;
+  }
+  header h1 span { color: var(--accent); }
+  .header-date { font-size: 0.7rem; color: var(--muted); }
+
+  /* NAV TABS */
+  nav {
+    display: flex;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+    position: sticky;
+    top: 73px;
+    z-index: 99;
+  }
+  nav button {
+    flex: 1;
+    padding: 14px 8px;
+    background: none;
+    border: none;
+    color: var(--muted);
+    font-family: 'DM Mono', monospace;
+    font-size: 0.72rem;
+    cursor: pointer;
+    transition: all 0.2s;
+    border-bottom: 2px solid transparent;
+    letter-spacing: 0.5px;
+  }
+  nav button.active {
+    color: var(--text);
+    border-bottom-color: var(--accent);
+  }
+
+  /* PAGES */
+  .page { display: none; padding: 20px 16px; }
+  .page.active { display: block; }
+
+  /* SALDO CARDS */
+  .saldo-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+  .saldo-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 18px 16px;
+    position: relative;
+    overflow: hidden;
+  }
+  .saldo-card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 3px;
+  }
+  .saldo-card.cash::before { background: var(--cash); }
+  .saldo-card.bank::before { background: var(--bank); }
+  .saldo-label {
+    font-size: 0.65rem;
+    color: var(--muted);
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+  .saldo-amount {
+    font-family: 'Syne', sans-serif;
+    font-weight: 700;
+    font-size: 1.1rem;
+    word-break: break-all;
+  }
+  .saldo-card.cash .saldo-amount { color: var(--cash); }
+  .saldo-card.bank .saldo-amount { color: var(--bank); }
+  .saldo-total {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 16px;
+    margin-bottom: 20px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .saldo-total-label { font-size: 0.7rem; color: var(--muted); letter-spacing: 1px; text-transform: uppercase; }
+  .saldo-total-amount { font-family: 'Syne', sans-serif; font-weight: 800; font-size: 1.3rem; color: var(--text); }
+
+  /* RECENT TRANSACTIONS */
+  .section-title {
+    font-size: 0.68rem;
+    color: var(--muted);
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    margin-bottom: 12px;
+  }
+  .tx-list { display: flex; flex-direction: column; gap: 8px; }
+  .tx-item {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    animation: fadeIn 0.3s ease;
+  }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+  .tx-dot {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .tx-info { flex: 1; min-width: 0; }
+  .tx-cat { font-size: 0.72rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+  .tx-note { font-size: 0.85rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tx-right { text-align: right; flex-shrink: 0; }
+  .tx-amount { font-family: 'Syne', sans-serif; font-weight: 700; font-size: 0.95rem; }
+  .tx-amount.out { color: var(--accent); }
+  .tx-amount.in { color: #2ecc71; }
+  .tx-wallet { font-size: 0.65rem; color: var(--muted); }
+  .tx-delete {
+    background: none;
+    border: none;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 1rem;
+    padding: 4px;
+    flex-shrink: 0;
+    transition: color 0.2s;
+  }
+  .tx-delete:hover { color: var(--accent); }
+
+  /* FORM */
+  .form-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 20px;
+    margin-bottom: 16px;
+  }
+  .form-title {
+    font-family: 'Syne', sans-serif;
+    font-weight: 700;
+    font-size: 1rem;
+    margin-bottom: 18px;
+  }
+  .form-group { margin-bottom: 14px; }
+  label { display: block; font-size: 0.68rem; color: var(--muted); letter-spacing: 1px; text-transform: uppercase; margin-bottom: 6px; }
+  input, select, textarea {
+    width: 100%;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 14px;
+    color: var(--text);
+    font-family: 'DM Mono', monospace;
+    font-size: 0.9rem;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+  input:focus, select:focus { border-color: var(--accent); }
+  select option { background: var(--surface2); }
+
+  .type-toggle {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin-bottom: 14px;
+  }
+  .type-btn {
+    padding: 10px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--surface2);
+    color: var(--muted);
+    font-family: 'DM Mono', monospace;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: all 0.2s;
+    text-align: center;
+  }
+  .type-btn.active-out { background: rgba(255,94,58,0.15); border-color: var(--accent); color: var(--accent); }
+  .type-btn.active-in { background: rgba(46,204,113,0.15); border-color: #2ecc71; color: #2ecc71; }
+
+  .wallet-toggle {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin-bottom: 14px;
+  }
+  .wallet-btn {
+    padding: 10px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--surface2);
+    color: var(--muted);
+    font-family: 'DM Mono', monospace;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: all 0.2s;
+    text-align: center;
+  }
+  .wallet-btn.active-cash { background: rgba(240,192,64,0.15); border-color: var(--cash); color: var(--cash); }
+  .wallet-btn.active-bank { background: rgba(78,170,255,0.15); border-color: var(--bank); color: var(--bank); }
+
+  .submit-btn {
+    width: 100%;
+    padding: 14px;
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 12px;
+    font-family: 'Syne', sans-serif;
+    font-weight: 700;
+    font-size: 1rem;
+    cursor: pointer;
+    transition: opacity 0.2s;
+    letter-spacing: 0.5px;
+  }
+  .submit-btn:hover { opacity: 0.85; }
+
+  /* CHART */
+  .chart-container {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 20px;
+    margin-bottom: 16px;
+  }
+  .chart-title {
+    font-family: 'Syne', sans-serif;
+    font-weight: 700;
+    font-size: 0.9rem;
+    margin-bottom: 16px;
+    color: var(--muted);
+    letter-spacing: 0.5px;
+  }
+  canvas { max-height: 220px; }
+
+  /* STATS */
+  .stats-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+  .stat-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px;
+  }
+  .stat-label { font-size: 0.62rem; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
+  .stat-value { font-family: 'Syne', sans-serif; font-weight: 700; font-size: 1rem; }
+
+  /* HISTORY FILTER */
+  .filter-row {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 14px;
+    overflow-x: auto;
+    padding-bottom: 4px;
+  }
+  .filter-chip {
+    padding: 6px 14px;
+    border-radius: 20px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--muted);
+    font-family: 'DM Mono', monospace;
+    font-size: 0.7rem;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: all 0.2s;
+  }
+  .filter-chip.active { border-color: var(--accent); color: var(--accent); background: rgba(255,94,58,0.1); }
+
+  /* EXPORT BTN */
+  .export-btn {
+    width: 100%;
+    padding: 12px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    color: var(--text);
+    font-family: 'DM Mono', monospace;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: border-color 0.2s;
+    margin-bottom: 16px;
+  }
+  .export-btn:hover { border-color: var(--accent); }
+
+  .empty-state {
+    text-align: center;
+    padding: 40px 20px;
+    color: var(--muted);
+    font-size: 0.8rem;
+  }
+
+  /* CATEGORY LEGEND */
+  .cat-legend { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+  .cat-row { display: flex; align-items: center; justify-content: space-between; }
+  .cat-name { display: flex; align-items: center; gap: 8px; font-size: 0.78rem; }
+  .cat-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .cat-val { font-family: 'Syne', sans-serif; font-size: 0.82rem; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Dompet<span>.</span>Nick</h1>
+  <div class="header-date" id="headerDate"></div>
+</header>
+
+<nav>
+  <button class="active" onclick="showPage('home')">Beranda</button>
+  <button onclick="showPage('tambah')">+ Catat</button>
+  <button onclick="showPage('grafik')">Grafik</button>
+  <button onclick="showPage('riwayat')">Riwayat</button>
+</nav>
+
+<!-- HOME -->
+<div class="page active" id="page-home">
+  <div class="saldo-grid">
+    <div class="saldo-card cash">
+      <div class="saldo-label">💵 Cash</div>
+      <div class="saldo-amount" id="saldo-cash">Rp 0</div>
+    </div>
+    <div class="saldo-card bank" style="grid-column: 1 / -1;">
+      <div class="saldo-label">🏦 Rekening</div>
+      <div id="saldo-bank-detail"></div>
+      <div class="saldo-amount" id="saldo-bank" style="margin-top:6px; border-top:1px solid #333; padding-top:6px;">Rp 0</div>
+    </div>
+  </div>
+  <div class="saldo-total">
+    <div class="saldo-total-label">Total</div>
+    <div class="saldo-total-amount" id="saldo-total">Rp 0</div>
+  </div>
+  <div class="section-title">Transaksi Terakhir</div>
+  <div class="tx-list" id="recent-list">
+    <div class="empty-state">Belum ada transaksi</div>
+  </div>
+</div>
+
+<!-- TAMBAH -->
+<div class="page" id="page-tambah">
+  <div class="form-card">
+    <div class="form-title">Catat Transaksi</div>
+
+    <div class="type-toggle">
+      <button class="type-btn active-out" id="btn-out" onclick="setType('out')">▼ Keluar</button>
+      <button class="type-btn" id="btn-in" onclick="setType('in')">▲ Masuk</button>
+    </div>
+
+    <div class="form-group">
+      <label>Dompet</label>
+      <div class="wallet-toggle">
+        <button class="wallet-btn active-cash" id="btn-cash" onclick="setWallet('cash')">💵 Cash</button>
+        <button class="wallet-btn" id="btn-bank" onclick="setWallet('bank')">🏦 Rekening</button>
+      </div>
+      <div id="sub-wallet-group" style="display:none; margin-top:10px;">
+        <label style="margin-bottom:8px;">Sub Rekening</label>
+        <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px;" id="sub-wallet-btns"></div>
+        <div style="display:flex; gap:8px;">
+          <input type="text" id="custom-wallet-input" placeholder="Tambah rekening baru..." style="flex:1;">
+          <button onclick="tambahSubWallet()" style="padding:10px 14px; background:var(--surface2); border:1px solid var(--border); border-radius:10px; color:var(--text); cursor:pointer; font-family:'DM Mono',monospace; white-space:nowrap; font-size:0.8rem;">+ Tambah</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="form-group" id="cat-group">
+      <label>Kategori</label>
+      <select id="kategori">
+        <option value="jajan">🍜 Jajan</option>
+        <option value="selfcare">💆 Self Care</option>
+        <option value="digital">💻 Digital Needs</option>
+        <option value="transportasi">🚗 Transportasi</option>
+        <option value="utilities">💡 Utilities</option>
+        <option value="tabungan">💰 Tabungan</option>
+        <option value="lainnya">📦 Lainnya</option>
+      </select>
+    </div>
+
+    <div class="form-group">
+      <label>Nominal (Rp)</label>
+      <input type="number" id="nominal" placeholder="50000" min="0">
+    </div>
+
+    <div class="form-group">
+      <label>Catatan (opsional)</label>
+      <input type="text" id="catatan" placeholder="e.g. makan siang warteg">
+    </div>
+
+    <button class="submit-btn" onclick="tambahTransaksi()">CATAT</button>
+  </div>
+</div>
+
+<!-- GRAFIK -->
+<div class="page" id="page-grafik">
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="stat-label">Keluar bulan ini</div>
+      <div class="stat-value" id="stat-out" style="color:var(--accent)">Rp 0</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Masuk bulan ini</div>
+      <div class="stat-value" id="stat-in" style="color:#2ecc71">Rp 0</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Transaksi</div>
+      <div class="stat-value" id="stat-count">0</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Terbanyak</div>
+      <div class="stat-value" id="stat-top" style="font-size:0.8rem">-</div>
+    </div>
+  </div>
+
+  <div class="chart-container">
+    <div class="chart-title">PENGELUARAN PER KATEGORI</div>
+    <canvas id="pieChart"></canvas>
+    <div class="cat-legend" id="cat-legend"></div>
+  </div>
+
+  <div class="chart-container">
+    <div class="chart-title">CASH VS REKENING</div>
+    <canvas id="barChart"></canvas>
+  </div>
+</div>
+
+<!-- RIWAYAT -->
+<div class="page" id="page-riwayat">
+  <div style="display:flex;gap:8px;margin-bottom:4px;">
     <button class="export-btn" onclick="exportCSV()" style="flex:1;">⬇ Export CSV</button>
     <label class="export-btn" style="flex:1;text-align:center;cursor:pointer;">
       ⬆ Import CSV
